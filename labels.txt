@@ -1,4 +1,0 @@
-0 yellowBanana
-1 GreenBanana
-2 BrownBanana
-3 BlackBanana
