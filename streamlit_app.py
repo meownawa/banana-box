@@ -2,9 +2,8 @@ import streamlit as st
 import cv2
 import numpy as np
 import os 
-import random
 from PIL import Image, ImageOps
-import tensorflow as tf
+import tflite_runtime.interpreter as tflite
 
 # 🎨 1. ตั้งค่าหน้าเว็บเบราว์เซอร์
 st.set_page_config(
@@ -120,27 +119,30 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown("<h1 class='main-title'>Banana Box 🍌</h1>", unsafe_allow_html=True)
-st.markdown("<p class='main-subtitle'>แอปพลิเคชันวิเคราะห์ระดับความสุกของกล้วย ด้วยโมเดล AI และค้นหาสูตรอาหารคาเฟ่สุดพิเศษ</p>", unsafe_allow_html=True)
+st.markdown("<p class='main-subtitle'>แอปพลิเคชันวิเคราะห์ระดับความสุกของกล้วย ด้วยระบบสมองกล AI ขนาดจิ๋ว</p>", unsafe_allow_html=True)
 
-# 🧠 3. โหลดโมเดล AI (Keras Model) แบบ Real-time ความเสถียรสูง
+# 🧠 3. โหลดโมเดลคอมแพค (TFLite Engine) โหลดไว ไม่กินแรม
 @st.cache_resource
-def load_banana_model():
+def load_tflite_model():
     try:
-        model = tf.keras.models.load_model("keras_model.h5", compile=False)
+        # เปิดตัวประมวลผลไฟล์ .tflite ที่โหลดมาจาก Teachable Machine
+        interpreter = tflite.Interpreter(model_path="model_unquant.tflite")
+        interpreter.allocate_tensors()
+        
         with open("labels.txt", "r", encoding="utf-8") as f:
             class_names = [line.strip().split(" ", 1)[1] for line in f.readlines()]
-        return model, class_names
+        return interpreter, class_names
     except Exception as e:
         return None, str(e)
 
-model, class_info = load_banana_model()
+interpreter, class_info = load_tflite_model()
 
-if model is not None:
-    st.success("ระบบประมวลผลกล้องพร้อมเชื่อมต่อโมเดล AI (Keras Model) สำเร็จแล้ว 🍌")
+if interpreter is not None:
+    st.success("ระบบประมวลผลพร้อมใช้งานผ่านสมองกล AI (TFLite Engine) ความเสถียรสูงแล้ว 🍌")
 else:
-    st.error(f"ไม่สามารถโหลดโมเดล AI ได้ กรุณาเช็กไฟล์บน GitHub: {class_info}")
+    st.error(f"ไม่สามารถโหลดโมเดลจิ๋วได้ กรุณาเช็กไฟล์บน GitHub: {class_info}")
 
-# 📘 คลังข้อมูลเมนูอาหาร (เชื่อมโยงตาม Class ใน labels.txt)
+# 📘 คลังข้อมูลเมนูอาหาร
 BANANA_KNOWLEDGE = {
     "GreenBanana": {
         "th_name": "กล้วยดิบ",
@@ -213,9 +215,9 @@ with col1:
         options=["ทั้งหมด", "ของคาว", "ของหวาน/ของว่าง", "เพื่อสุขภาพ", "สำหรับเด็ก"]
     )
 
-    # 🛠️ ตรรกะประมวลผลภาพถ่ายด้วยโมเดล AI จาก Teachable Machine
-    selected_img = None
+    # 🛠️ ตรรกะประมวลผลรูปภาพเข้าสู่ TFLite Interpreter
     img_for_model = None
+    selected_img = None
 
     if camera_image is not None:
         img_pil = Image.open(camera_image)
@@ -226,23 +228,29 @@ with col1:
         selected_img = np.array(img_pil.convert("RGB"))
         img_for_model = img_pil
 
-    if img_for_model is not None and model is not None:
-        # เตรียมรูปภาพให้ตรงสเปกของโมเดล (ขนาด 224x224)
+    if img_for_model is not None and interpreter is not None:
+        # เตรียมสเปกภาพให้อ่านขนาด 224x224 ตามแบบฉบับ Teachable Machine
         size = (224, 224)
         image = ImageOps.fit(img_for_model, size, Image.Resampling.LANCZOS)
         image_array = np.asarray(image)
         normalized_image_array = (image_array.astype(np.float32) / 127.5) - 1
         
-        data = np.ndarray(shape=(1, 224, 224, 3), dtype=np.float32)
-        data[0] = normalized_image_array
+        input_data = np.ndarray(shape=(1, 224, 224, 3), dtype=np.float32)
+        input_data[0] = normalized_image_array
 
-        # ทำนายผลด้วยโมเดล AI
-        prediction = model.predict(data)
+        # ส่งพิกเซลเข้าคำนวณใน TFLite Engine
+        input_details = interpreter.get_input_details()
+        output_details = interpreter.get_output_details()
+        
+        interpreter.set_tensor(input_details[0]['index'], input_data)
+        interpreter.invoke()
+        
+        prediction = interpreter.get_tensor(output_details[0]['index'])
         index = np.argmax(prediction)
         class_name = class_info[index].strip()
         confidence_score = prediction[0][index] * 100
 
-        # บันทึกค่าลงระบบ
+        # บันทึกสถานะ
         st.session_state.current_status_key = class_name
         st.session_state.scan_confidence = confidence_score
         st.session_state.saved_rgb_frame = selected_img
@@ -255,7 +263,7 @@ with col2:
         
         st.markdown(f"""
             <div class='status-side-box'>
-                <p style='margin:0; font-size:1rem; color:#5C4033;'>ระดับความสุกที่ตรวจพบล่าสุดจาก AI</p>
+                <p style='margin:0; font-size:1rem; color:#5C4033;'>ระดับความสุกที่ตรวจพบล่าสุดจาก AI จิ๋ว</p>
                 <h2 style='margin:5px 0; color:#D35400;'>{info['th_name']} ({st.session_state.scan_confidence:.1f}%)</h2>
                 <p style='margin:0; color:#8B6508;'><b>คำแนะนำ:</b> {info['days_to_ripe']}</p>
             </div>
@@ -263,7 +271,6 @@ with col2:
         st.write("")
         
         if st.session_state.saved_rgb_frame is not None:
-            # 🛠️ แก้บั๊กหน้าจอขาวโดยการเปลี่ยนเป็น use_column_width="always" ปลอดภัยสำหรับทุกเวอร์ชัน
             st.image(st.session_state.saved_rgb_frame, caption="ภาพกล้วยที่ถูกบันทึกเข้าสู่ระบบ", use_column_width="always")
             
         st.markdown(f"#### 🍽️ แนะนำเมนูเฉพาะประเภท **[{food_filter}]** :")
@@ -283,6 +290,6 @@ with col2:
         if menu_count == 0:
             st.warning(f"กล้วยระดับนี้ยังไม่มีเมนูที่เข้าข่ายประเภท '{food_filter}' ลองเปลี่ยนตัวกรองดูนะครับ")
     else:
-        st.info("💡 วิธีใช้งาน: นายแค่กดปุ่ม **'Take Photo'** เพื่อถ่ายรูปกล้วยจากหน้ากล้อง หรือจะเลือกอัปโหลดรูปภาพกล้วยเข้ามาก็ได้ครับ ระบบจะวิเคราะห์ระดับความสุกด้วยโมเดล AI พร้อมแนะนำเมนูอาหารคาเฟ่ให้ทันทีตรงนี้เลย!")
+        st.info("💡 วิธีใช้งาน: นายแค่กดปุ่ม **'Take Photo'** เพื่อถ่ายรูปกล้วยจากหน้ากล้อง หรือจะเลือกอัปโหลดรูปภาพกล้วยเข้ามาก็ได้ครับ ระบบจะวิเคราะห์ระดับความสุกด้วยสมองกล AI ขนาดจิ๋วพร้อมแนะนำเมนูอาหารคาเฟ่ให้ทันทีตรงนี้เลย!")
 
-st.markdown("<br><hr><center style='color:#8B6508; font-size:0.85rem;'>Banana Box Studio | พัฒนาด้วย Streamlit Ultra Stable & Keras AI</center>", unsafe_allow_html=True)
+st.markdown("<br><hr><center style='color:#8B6508; font-size:0.85rem;'>Banana Box Studio | พัฒนาด้วย Streamlit Ultra Stable & TFLite</center>", unsafe_allow_html=True)
